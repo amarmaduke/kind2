@@ -194,6 +194,8 @@ let of_channel in_ch =
           argument *)
         raise (NoMainNode "Main node not found in input")
     in
+    let pp = LustreIndex.pp_print_index_trie true Var.pp_print_var Format.std_formatter
+    in List.map pp (List.map (fun (v,i) -> i) globals.free_constants);
     (* Return a subsystem tree from the list of nodes *)
     LN.subsystem_of_nodes nodes', globals, declarations
 

@@ -134,6 +134,8 @@ val extract_consts: LA.const_clocked_typed_decl -> tc_context
 val get_constant_ids: tc_context -> LA.ident list
 (** Returns the constants declared in the typing context  *)
 
+val get_constant_store: tc_context -> const_store
+
 val lookup_contract_exports: tc_context -> LA.ident -> ty_store option
 (** lookup the symbols exported by the contract *)
 

@@ -217,6 +217,14 @@ let get_constant_ids: tc_context -> LA.ident list
   = fun ctx -> IMap.keys ctx.vl_ctx
 (** Returns the constants declared in the typing context  *)
 
+let get_constant_store: tc_context -> const_store
+  = fun ctx -> ctx.vl_ctx
+(** Returns the constant store from the typing context 
+
+  Used as a helper function for converting a typed Lustre AST
+  into the Lustre Node IR
+*)
+
 let lookup_contract_exports: tc_context -> LA.ident -> ty_store option
   = fun ctx i -> IMap.find_opt i (ctx.contract_export_ctx)
 (** Lookup a contract exports  *)
