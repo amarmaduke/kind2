@@ -30,10 +30,19 @@ module X = LustreIndex
 
 module C = TypeCheckerContext
 
-let build_state_var
-  ?(is_input)
-  ?(is_const)
-  ?(for_inv_gen)
+let rec compile_decls ctx decls = 
+  (* let nodes = List.map declaration_to_node decls in *)
+  let free_constants = get_free_constants ctx in
+  (* let state_var_bounds = Lib.todo __LOC__ in *)
+  let pp = LustreIndex.pp_print_index_trie true Var.pp_print_var
+  in
+    List.iter (fun c -> Format.printf "%a@." pp c) free_constants;
+    Lib.todo __LOC__
+
+and build_state_var
+  ?is_input
+  ?is_const
+  ?for_inv_gen
   ?(shadow = false)
   scope
   ident
@@ -90,13 +99,109 @@ let build_state_var
   in
   state_var
 
-let declaration_to_node = function
+and compile_node_decl ctx pos i ext inputs outputs locals items contracts =
+  let name = I.mk_string_ident i in
+  let node_scope = name |> I.to_scope in
+  let is_extern = ext
+  and instance = StateVar.mk_state_var
+    ~is_const:true
+    (I.instance_ident |> I.string_of_ident false)
+    (I.to_scope name @ I.reserved_scope)
+    Type.t_int
+  and init_flag = StateVar.mk_state_var
+    (I.instance_ident |> I.string_of_ident false)
+    (I.to_scope name @ I.reserved_scope)
+    Type.t_bool
+  and inputs =
+    (** TODO: The documentation on lustreNode says that a single argument
+      node should have a non-list index (a singleton index), but the old
+      node generation code does not seem to honor that *)
+    let over_inputs = fun (compiled_input) (pos, i, ast_type, clock, is_const) ->
+      match clock with
+      | A.ClockTrue ->
+        
+        let n = X.top_max_index compiled_input |> succ
+        and ident = I.mk_string_ident i
+        and index_types = compile_ast_type ctx ast_type in
+        let over_indices = fun index index_type accum ->
+          let state_var = build_state_var
+            ~is_input:true
+            ~is_const
+            (node_scope @ I.user_scope)
+            ident
+            index
+            index_type
+            (Some N.Input)
+          in X.add (X.ListIndex n :: index) state_var accum
+        in X.fold over_indices index_types compiled_input
+      | _ -> fail_at_position pos "Clocked node inputs not supported"
+    in List.fold_left over_inputs X.empty inputs
+  and oracles = Lib.todo __LOC__
+  and outputs =
+    (** TODO: The documentation on lustreNode does not state anything about
+      the requirements for indices of outputs, yet the old code makes it
+      a singleton index in the event there is only one index *)
+    let over_outputs = fun (is_single) (compiled_output) (pos, i, ast_type, clock) ->
+      match clock with
+      | A.ClockTrue ->
+        let n = X.top_max_index compiled_output |> succ
+        and ident = I.mk_string_ident i
+        and index_types = compile_ast_type ctx ast_type in
+        let over_indices = fun index index_type accum ->
+          let state_var = build_state_var
+            ~is_input:false
+            (node_scope @ I.user_scope)
+            ident
+            index
+            index_type
+            (Some N.Output)
+          and index' = if is_single then index
+            else X.ListIndex n :: index
+          in X.add index' state_var accum
+        in X.fold over_indices index_types compiled_output
+      | _ -> fail_at_position pos "Clocked node outputs not supported"
+    and is_single = List.length outputs = 1
+    in List.fold_left (over_outputs is_single) X.empty outputs
+  and locals = Lib.todo __LOC__
+  and equations = Lib.todo __LOC__
+  and calls = Lib.todo __LOC__
+  and asserts = Lib.todo __LOC__
+  and props = Lib.todo __LOC__
+  and contract = Lib.todo __LOC__
+  and is_main = Lib.todo __LOC__
+  and is_function = Lib.todo __LOC__
+  and state_var_source_map = Lib.todo __LOC__
+  and oracle_state_var_map = Lib.todo __LOC__
+  and state_var_expr_map = Lib.todo __LOC__
+  and silent_contracts = Lib.todo __LOC__
+  in let (node:N.t) = { name;
+    is_extern;
+    instance;
+    init_flag;
+    inputs;
+    oracles;
+    outputs;
+    locals;
+    equations;
+    calls;
+    asserts;
+    props;
+    contract;
+    is_main;
+    is_function;
+    state_var_source_map;
+    oracle_state_var_map;
+    state_var_expr_map;
+    silent_contracts
+  } in node
+
+and compile_declaration ctx = function
 | A.TypeDecl (pos, type_rhs) -> Lib.todo __LOC__
 | A.ConstDecl (pos, const_decl) -> Lib.todo __LOC__
 | A.FuncDecl (pos, (i, ext, [], inputs, outputs, locals, items, contracts))
   -> Lib.todo __LOC__
-| A.NodeDecl (pos, (i, ext, [], inputs, outputs, locals, items, contracts))
-  -> Lib.todo __LOC__
+| A.NodeDecl (pos, (i, ext, [], inputs, outputs, locals, items, contracts)) ->
+  compile_node_decl ctx pos i ext inputs outputs locals items contracts
 | A.ContractNodeDecl (pos, node_decl) -> Lib.todo __LOC__
 | A.NodeParamInst (pos, _)
 | A.NodeDecl (pos, _) ->
@@ -104,7 +209,7 @@ let declaration_to_node = function
 | A.FuncDecl (pos, _) ->
   fail_at_position pos "Parametric functions are not supported"
 
-let rec compile_ast_type ctx = function
+and compile_ast_type ctx = function
   | A.TVar _ -> Lib.todo __LOC__
   | A.Bool _ -> X.singleton X.empty_index Type.t_bool
   | A.Int _ -> X.singleton X.empty_index Type.t_int
@@ -155,9 +260,10 @@ let rec compile_ast_type ctx = function
   | A.TArr _ -> assert false
       (* Lib.todo "Trying to flatten function type. This should not happen" *)
 
-let get_free_constants ctx =
-  let const_ids = C.get_constant_store ctx in
-  let extract = fun (id, (_expr, ty)) -> 
+and get_free_constants ctx =
+  let const_ids = C.get_constant_store ctx
+  and compile = fun x -> match x with
+  | Some (id, ty) ->
     let ident = I.mk_string_ident id in
     (* [_expr] is only an AST identifier with a
       redundant identifier string and the position information *)
@@ -176,17 +282,19 @@ let get_free_constants ctx =
       let v = Var.mk_const_state_var state_var in
       X.add i v vt
     in
-    X.fold op tyd X.empty
+    Some (X.fold op tyd X.empty)
+  | None -> None
+  (* TODO: The typechecker marks free constants with an identifier expresion
+    Should it be refactored to track an option instead? *)
+  and is_free = fun (id, (expr, ty)) ->
+    match expr with
+    | A.Ident (_, id') ->
+      if Stdlib.compare id id' = 0
+      then Some (id, ty)
+      else None
+    | _ -> None
   in
-    const_ids |> C.IMap.to_seq |> (Seq.map extract) |> List.of_seq
-
-
-let declarations_to_nodes ctx decls = 
-  (* let nodes = List.map declaration_to_node decls in *)
-  let free_constants = get_free_constants ctx in
-  (* let state_var_bounds = Lib.todo __LOC__ in *)
-  let pp = LustreIndex.pp_print_index_trie true Var.pp_print_var Format.std_formatter
-  in
-    List.map pp free_constants;
-    Lib.todo __LOC__
+    const_ids |> C.IMap.to_seq 
+      |> (Seq.filter_map (fun x -> x |> is_free |> compile))
+      |> List.of_seq
 
