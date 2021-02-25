@@ -27,6 +27,7 @@ module G = LustreGlobals
 module N = LustreNode
 module I = LustreIdent
 module X = LustreIndex
+module H = LustreIdent.Hashtbl
 
 module C = TypeCheckerContext
 
@@ -100,26 +101,28 @@ and build_state_var
   state_var
 
 and compile_node_decl ctx pos i ext inputs outputs locals items contracts =
-  let name = I.mk_string_ident i in
-  let node_scope = name |> I.to_scope in
-  let is_extern = ext
-  and instance = StateVar.mk_state_var
+  let name = I.mk_string_ident i
+  in let node_scope = name |> I.to_scope
+  in let is_extern = ext
+  in let instance = StateVar.mk_state_var
     ~is_const:true
     (I.instance_ident |> I.string_of_ident false)
     (I.to_scope name @ I.reserved_scope)
     Type.t_int
-  and init_flag = StateVar.mk_state_var
+  in let init_flag = StateVar.mk_state_var
     (I.instance_ident |> I.string_of_ident false)
     (I.to_scope name @ I.reserved_scope)
     Type.t_bool
-  and inputs =
+  (** We imperatively build up a map from identifiers to
+    trie-stored state variables *)
+  in let ident_map = H.create 7
+  in let inputs =
     (** TODO: The documentation on lustreNode says that a single argument
       node should have a non-list index (a singleton index), but the old
       node generation code does not seem to honor that *)
     let over_inputs = fun (compiled_input) (pos, i, ast_type, clock, is_const) ->
       match clock with
       | A.ClockTrue ->
-        
         let n = X.top_max_index compiled_input |> succ
         and ident = I.mk_string_ident i
         and index_types = compile_ast_type ctx ast_type in
@@ -132,12 +135,13 @@ and compile_node_decl ctx pos i ext inputs outputs locals items contracts =
             index
             index_type
             (Some N.Input)
-          in X.add (X.ListIndex n :: index) state_var accum
+          in let result = X.add (X.ListIndex n :: index) state_var accum
+          in H.add ident_map ident result;
+          result
         in X.fold over_indices index_types compiled_input
       | _ -> fail_at_position pos "Clocked node inputs not supported"
     in List.fold_left over_inputs X.empty inputs
-  and oracles = Lib.todo __LOC__
-  and outputs =
+  in let outputs =
     (** TODO: The documentation on lustreNode does not state anything about
       the requirements for indices of outputs, yet the old code makes it
       a singleton index in the event there is only one index *)
@@ -157,23 +161,88 @@ and compile_node_decl ctx pos i ext inputs outputs locals items contracts =
             (Some N.Output)
           and index' = if is_single then index
             else X.ListIndex n :: index
-          in X.add index' state_var accum
+          in let result = X.add index' state_var accum
+          in H.add ident_map ident result;
+          result
         in X.fold over_indices index_types compiled_output
       | _ -> fail_at_position pos "Clocked node outputs not supported"
     and is_single = List.length outputs = 1
     in List.fold_left (over_outputs is_single) X.empty outputs
-  and locals = Lib.todo __LOC__
-  and equations = Lib.todo __LOC__
-  and calls = Lib.todo __LOC__
-  and asserts = Lib.todo __LOC__
-  and props = Lib.todo __LOC__
-  and contract = Lib.todo __LOC__
-  and is_main = Lib.todo __LOC__
-  and is_function = Lib.todo __LOC__
-  and state_var_source_map = Lib.todo __LOC__
-  and oracle_state_var_map = Lib.todo __LOC__
-  and state_var_expr_map = Lib.todo __LOC__
-  and silent_contracts = Lib.todo __LOC__
+  in let locals =
+    let over_locals = fun local ->
+      match local with
+      | A.NodeVarDecl (_, (pos, i, ast_type, A.ClockTrue)) ->
+        let ident = I.mk_string_ident i
+        and index_types = compile_ast_type ctx ast_type in
+        let over_indices = fun index index_type accum ->
+          let state_var = build_state_var
+            ~is_input:false
+            (node_scope @ "impl" :: I.user_scope)
+            ident
+            index
+            index_type
+            (Some N.Local)
+          in let result = X.add index state_var accum
+          in H.add ident_map ident result;
+          result
+        in Some (X.fold over_indices index_types X.empty)
+      | A.NodeVarDecl (_, (pos, i, _, _)) -> fail_at_position pos
+        (Format.asprintf
+          "Clocked node local variable not supported for %a"
+          A.pp_print_ident i)
+      (** TODO: Old code handles node constants here to build free_constants
+        later, we should be able to all the free_constants at once
+        One possible issue is getting the scope correct *)
+      | _ -> None
+    in List.filter_map over_locals locals
+  in let (node_props, node_eqs, node_asserts, node_automations, is_main) = 
+    let over_items = fun (props, eqs, asserts, autos, is_main) (item) ->
+      match item with
+      | A.Body e -> begin match e with
+        | A.Assert (_, _) as a -> (props, eqs, a :: asserts, autos, is_main)
+        | A.Equation (_, _, _) as e -> (props, e :: eqs, asserts, autos, is_main)
+        | A.Automaton (_, _, _, _) as a -> (props, eqs, asserts, a :: autos, is_main)
+        end
+      | A.AnnotMain flag -> (props, eqs, asserts, autos, flag || is_main)
+      | A.AnnotProperty (_, _, _) as p -> (p :: props, eqs, asserts, autos, is_main) 
+    in List.fold_left over_items ([], [], [], [], false) items
+  in let props =
+    (** TODO: Old code checks for unguarded pre in the props ast *)
+    Lib.todo __LOC__
+  in let asserts = Lib.todo __LOC__
+  in let (equations, calls) =
+    let compile_struct_item = fun struct_item -> match struct_item with
+      | A.SingleIdent (pos, i) ->
+        let ident = I.mk_string_ident i in
+        H.find ident_map ident, 0
+      | A.ArrayDef (pos, i, l) ->
+        let ident = I.mk_string_ident i in
+        let result = H.find ident_map ident in
+        (** TODO: Old code checks that array lengths between l and result match **)
+        (** TODO: Old code checks that result must have at least one element **)
+        (** TODO: Old code suggets that shadowing can occur here *)
+        let indexes = List.length l in
+        result, indexes
+      | A.TupleStructItem (pos, _)
+      | A.TupleSelection (pos, _, _)
+      | A.FieldSelection (pos, _, _)
+      | A.ArraySliceStructItem (pos, _, _) ->
+        fail_at_position pos "Assignment not supported"
+    in let over_equations = fun (pos, lhs, ast_expr) ->
+      let eq_lhs, indexes = match lhs with
+        | A.StructDef (pos, []) -> (X.empty, 0)
+        | A.StructDef (pos, [e]) -> compile_struct_item e
+        | A.StructDef (pos, l) -> Lib.todo __LOC__
+      in Lib.todo __LOC__
+    in Lib.todo __LOC__
+  in let oracles = Lib.todo __LOC__
+  in let contract = Lib.todo __LOC__
+  in let is_function = Lib.todo __LOC__
+  in let state_var_source_map = Lib.todo __LOC__
+  in let oracle_state_var_map = Lib.todo __LOC__
+  in let state_var_expr_map = Lib.todo __LOC__
+  (** TODO: Not currently handling silent contracts *)
+  in let silent_contracts = Lib.todo __LOC__
   in let (node:N.t) = { name;
     is_extern;
     instance;
